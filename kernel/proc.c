@@ -145,6 +145,9 @@ found:
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
+  
+  // Initialize trace mask to 0
+  p->mask = 0;
 
   return p;
 }
@@ -168,6 +171,7 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+  p->mask = 0;
   p->state = UNUSED;
 }
 
@@ -309,6 +313,9 @@ fork(void)
   np->cwd = idup(p->cwd);
 
   safestrcpy(np->name, p->name, sizeof(p->name));
+
+  // inherit trace mask from parent
+  np->mask = p->mask;
 
   pid = np->pid;
 

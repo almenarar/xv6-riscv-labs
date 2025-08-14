@@ -101,6 +101,7 @@ main(int argc, char *argv[])
         printf("OK: secret is %s\n", output);
       } else {
         printf("FAIL: no/incorrect secret\n");
+        printf("secret is %s and output is %s\n", secret, output);
       }
     }
   }

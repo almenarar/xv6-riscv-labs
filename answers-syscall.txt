@@ -1,0 +1,7 @@
+1. A system call in xv6 starts when a user program executes the ecall instruction, which transfers control to the kernel trap handler. The kernel uses the system call number (stored in register a7) to look up the appropriate handler function in the syscalls array and executes it.
+
+2. The trace syscall sets a mask in the process structure that indicates which system calls should be traced. When a traced system call is executed, the kernel prints information about the call including the process ID, system call name, and return value.
+
+3. The fork system call creates a new process by copying the parent process. It allocates a new process structure, copies the parent's memory space, file descriptors, and other resources to the child. The child process inherits most properties from the parent, including the trace mask for syscall tracing.
+
+4. In the sys_info system call, one challenge is obtaining kernel information from user space safely. The implementation must carefully copy data from kernel space to user space using functions like copyout() to avoid security vulnerabilities and memory corruption.

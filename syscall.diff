@@ -1,0 +1,268 @@
+diff --git a/.gitignore b/.gitignore
+index 11d0677..14f3556 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -25,3 +25,4 @@ barrier
+ .DS_Store
+ *.dSYM
+ *.pcap
++venv
+\ No newline at end of file
+diff --git a/Makefile b/Makefile
+index 74e454f..b2f8e34 100644
+--- a/Makefile
++++ b/Makefile
+@@ -63,6 +63,12 @@ endif
+ # perhaps in /opt/riscv/bin
+ #TOOLPREFIX = 
+ 
++# Homebrew LLVM configuration
++PATH := /opt/homebrew/opt/llvm@16/bin:$(PATH)
++CPPFLAGS := -I/opt/homebrew/opt/llvm@16/include
++LDFLAGS_EXTRA := -L/opt/homebrew/opt/llvm@16/lib
++TOOLPREFIX = /opt/riscv/bin/riscv64-unknown-elf-
++
+ # Try to infer the correct TOOLPREFIX if not set
+ ifndef TOOLPREFIX
+ TOOLPREFIX := $(shell if riscv64-unknown-elf-objdump -i 2>&1 | grep 'elf64-big' >/dev/null 2>&1; \
+@@ -194,6 +200,7 @@ UPROGS=\
+ 	$U/_grind\
+ 	$U/_wc\
+ 	$U/_zombie\
++	$U/_trace\
+ 
+ 
+ 
+diff --git a/kernel/proc.c b/kernel/proc.c
+index 130d9ce..fd2077b 100644
+--- a/kernel/proc.c
++++ b/kernel/proc.c
+@@ -145,6 +145,9 @@ found:
+   memset(&p->context, 0, sizeof(p->context));
+   p->context.ra = (uint64)forkret;
+   p->context.sp = p->kstack + PGSIZE;
++  
++  // Initialize trace mask to 0
++  p->mask = 0;
+ 
+   return p;
+ }
+@@ -168,6 +171,7 @@ freeproc(struct proc *p)
+   p->chan = 0;
+   p->killed = 0;
+   p->xstate = 0;
++  p->mask = 0;
+   p->state = UNUSED;
+ }
+ 
+@@ -310,6 +314,9 @@ fork(void)
+ 
+   safestrcpy(np->name, p->name, sizeof(p->name));
+ 
++  // inherit trace mask from parent
++  np->mask = p->mask;
++
+   pid = np->pid;
+ 
+   release(&np->lock);
+diff --git a/kernel/proc.h b/kernel/proc.h
+index d021857..87202d9 100644
+--- a/kernel/proc.h
++++ b/kernel/proc.h
+@@ -104,4 +104,5 @@ struct proc {
+   struct file *ofile[NOFILE];  // Open files
+   struct inode *cwd;           // Current directory
+   char name[16];               // Process name (debugging)
++  int mask;                    // Syscall trace mask
+ };
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index ed65409..8c22d0c 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -101,6 +101,7 @@ extern uint64 sys_unlink(void);
+ extern uint64 sys_link(void);
+ extern uint64 sys_mkdir(void);
+ extern uint64 sys_close(void);
++extern uint64 sys_trace(void);
+ 
+ // An array mapping syscall numbers from syscall.h
+ // to the function that handles the system call.
+@@ -126,6 +127,32 @@ static uint64 (*syscalls[])(void) = {
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
++[SYS_traces]   sys_trace,
++};
++
++static char *sys_names[] = {
++[SYS_fork]    "fork",
++[SYS_exit]    "exit",
++[SYS_wait]    "wait",
++[SYS_pipe]    "pipe",
++[SYS_read]    "read",
++[SYS_kill]    "kill",
++[SYS_exec]    "exec",
++[SYS_fstat]   "fstat",
++[SYS_chdir]   "chdir",
++[SYS_dup]     "dup",
++[SYS_getpid]  "getpid",
++[SYS_sbrk]    "sbrk",
++[SYS_sleep]   "sleep",
++[SYS_uptime]  "uptime",
++[SYS_open]    "open",
++[SYS_write]   "write",
++[SYS_mknod]   "mknod",
++[SYS_unlink]  "unlink",
++[SYS_link]    "link",
++[SYS_mkdir]   "mkdir",
++[SYS_close]   "close",
++[SYS_traces]   "trace",
+ };
+ 
+ void
+@@ -139,6 +166,10 @@ syscall(void)
+     // Use num to lookup the system call function for num, call it,
+     // and store its return value in p->trapframe->a0
+     p->trapframe->a0 = syscalls[num]();
++
++    if (p->mask & (1 << num)) {
++      printf("%d: syscall %s -> %ld\n", p->pid, sys_names[num], p->trapframe->a0);
++    }
+   } else {
+     printf("%d %s: unknown sys call %d\n",
+             p->pid, p->name, num);
+diff --git a/kernel/syscall.h b/kernel/syscall.h
+index bc5f356..524618a 100644
+--- a/kernel/syscall.h
++++ b/kernel/syscall.h
+@@ -20,3 +20,4 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++#define SYS_traces  22
+diff --git a/kernel/sysproc.c b/kernel/sysproc.c
+index 3b4d5bd..a118c9c 100644
+--- a/kernel/sysproc.c
++++ b/kernel/sysproc.c
+@@ -6,6 +6,15 @@
+ #include "spinlock.h"
+ #include "proc.h"
+ 
++uint64
++sys_trace(void)
++{
++  int mask;
++  argint(0, &mask);
++  myproc()->mask = mask;
++  return 0;
++}
++
+ uint64
+ sys_exit(void)
+ {
+diff --git a/user/attack.c b/user/attack.c
+index 928e7d0..79984e3 100644
+--- a/user/attack.c
++++ b/user/attack.c
+@@ -3,11 +3,39 @@
+ #include "user/user.h"
+ #include "kernel/riscv.h"
+ 
++char*
++memmem(char *haystack, int haystack_len, char *needle, int needle_len)
++{
++  int i, j;
++  if (needle_len == 0) return haystack;
++  if (haystack_len < needle_len) return 0;
++
++  for (i = 0; i <= haystack_len - needle_len; i++) {
++    for (j = 0; j < needle_len; j++) {
++      if (haystack[i+j] != needle[j]) {
++        break;
++      }
++    }
++    if (j == needle_len) {
++      return &haystack[i];
++    }
++  }
++  return 0;
++}
++
+ int
+ main(int argc, char *argv[])
+ {
+-  // your code here.  you should write the secret to fd 2 using write
+-  // (e.g., write(2, secret, 8)
++  char *base = sbrk(PGSIZE*64);
++
++  //cannot rely on string first chars
++  char *marker_to_find = "very very secret pw is:";
++  
++  char *found_marker = memmem(base, PGSIZE*64, marker_to_find, strlen(marker_to_find));
++
++  char *password_start = found_marker + strlen(marker_to_find);
+ 
+-  exit(1);
++  write(2, password_start+1, 8);
++  
++  exit(0);
+ }
+diff --git a/user/attacktest.c b/user/attacktest.c
+index 6853b62..8bcfbbf 100644
+--- a/user/attacktest.c
++++ b/user/attacktest.c
+@@ -101,6 +101,7 @@ main(int argc, char *argv[])
+         printf("OK: secret is %s\n", output);
+       } else {
+         printf("FAIL: no/incorrect secret\n");
++        printf("secret is %s and output is %s\n", secret, output);
+       }
+     }
+   }
+diff --git a/user/trace.c b/user/trace.c
+index 474b26c..3332ba7 100644
+--- a/user/trace.c
++++ b/user/trace.c
+@@ -14,7 +14,7 @@ main(int argc, char *argv[])
+     exit(1);
+   }
+ 
+-  if (trace(atoi(argv[1])) < 0) {
++  if (traces(atoi(argv[1])) < 0) {
+     fprintf(2, "%s: trace failed\n", argv[0]);
+     exit(1);
+   }
+diff --git a/user/user.h b/user/user.h
+index f16fe27..7db5717 100644
+--- a/user/user.h
++++ b/user/user.h
+@@ -22,6 +22,7 @@ int getpid(void);
+ char* sbrk(int);
+ int sleep(int);
+ int uptime(void);
++int traces(int);
+ 
+ // ulib.c
+ int stat(const char*, struct stat*);
+diff --git a/user/usertests.c b/user/usertests.c
+index 28b53f9..7df0278 100644
+--- a/user/usertests.c
++++ b/user/usertests.c
+@@ -244,7 +244,7 @@ copyinstr3(char *s)
+ // See if the kernel refuses to read/write user memory that the
+ // application doesn't have anymore, because it returned it.
+ void
+-rwsbrk()
++rwsbrk(char *s)
+ {
+   int fd, n;
+   
+diff --git a/user/usys.pl b/user/usys.pl
+index 01e426e..3b717ee 100755
+--- a/user/usys.pl
++++ b/user/usys.pl
+@@ -36,3 +36,4 @@ entry("getpid");
+ entry("sbrk");
+ entry("sleep");
+ entry("uptime");
++entry("traces");
