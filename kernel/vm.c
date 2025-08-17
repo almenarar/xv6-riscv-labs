@@ -303,6 +303,67 @@ uvmfree(pagetable_t pagetable, uint64 sz)
   freewalk(pagetable);
 }
 
+int
+iscowpage(pagetable_t pagetable, uint64 sz, uint64 va) {
+  if (va < PGSIZE || va >= MAXVA || va > sz)
+    return 0;
+
+  va = PGROUNDDOWN((uint64)va);
+  pte_t* pte = walk(pagetable, va, 0);
+
+  if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_COW) == 0)
+    return 0;
+
+  return 1;
+}
+
+int
+cowalloc(pagetable_t pagetable, uint64 va)
+{
+  if (va > MAXVA) {
+    return -1;
+  }
+
+  va = PGROUNDDOWN(va);
+  pte_t *pte = walk(pagetable, va, 0);
+  uint64 pa = PTE2PA(*pte);
+  char *mem;
+
+  if (pte == 0) {
+    panic("cowalloc: pte should exist");
+  }
+  if ((*pte & PTE_V) == 0) {
+    panic("cowalloc: page not present");
+  }
+
+  // If the address is used only once,
+  // the current page table is used directly
+  if (get_cowref(pa) <= 1) {
+    *pte |= PTE_W;
+    *pte ^= PTE_COW;
+    return 0;
+  }
+
+  mem = kalloc();
+  if (mem == 0) {
+    printf("cowalloc: kalloc failed\n");
+    return -1;
+  }
+
+  memmove(mem, (char *) pa, PGSIZE);
+
+  uint flags = PTE_FLAGS(*pte);
+  flags ^= PTE_COW;
+  flags |= PTE_W;
+  uvmunmap(pagetable, va, 1, 1);
+  if (mappages(pagetable, va, PGSIZE, (uint64)mem, flags) != 0) {
+    kfree(mem);
+    return -1;
+  }
+
+  return 0;
+}
+
 // Given a parent process's page table, copy
 // its memory into a child's page table.
 // Copies both the page table and the
@@ -315,7 +376,6 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -323,14 +383,18 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
+
+
+    if (*pte & PTE_W) {
+      *pte ^= PTE_W;
+      *pte |= PTE_COW;
+    }
+
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+    if(mappages(new, i, PGSIZE, (uint64)pa, flags) != 0){
       goto err;
     }
+    inc_cowref(pa);
   }
   return 0;
 
@@ -365,11 +429,28 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
     va0 = PGROUNDDOWN(dstva);
     if(va0 >= MAXVA)
       return -1;
+  
     pte = walk(pagetable, va0, 0);
-    if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0 ||
-       (*pte & PTE_W) == 0)
+    if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
       return -1;
+
     pa0 = PTE2PA(*pte);
+    if (pa0 == 0) {
+      return -1;
+    }
+
+    if (*pte & PTE_COW) {
+      if (cowalloc(pagetable, va0) < 0) {
+        return -1;
+      }
+      pa0 = PTE2PA(*pte);
+    }
+
+    pte = walk(pagetable, va0, 0);
+    // forbid copyout over read-only user text pages.
+    if((*pte & PTE_W) == 0)
+      return -1;
+      
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;

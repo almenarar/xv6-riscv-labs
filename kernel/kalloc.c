@@ -23,6 +23,11 @@ struct {
   struct run *freelist;
 } kmem;
 
+struct {
+  struct spinlock lock;
+  int ref[(PHYSTOP - KERNBASE) / PGSIZE];
+} kpage;
+
 void
 kinit()
 {
@@ -51,6 +56,16 @@ kfree(void *pa)
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
 
+  // If the number of references is greater than 1,
+  // there is no need to free the memory
+  if (get_cowref((uint64) pa) > 1) {
+    dec_cowref((uint64) pa);
+    return;
+  }
+
+  // Modify the value to 0 and treat it as initialization
+  set_cowref((uint64) pa, 0);
+
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
 
@@ -77,6 +92,53 @@ kalloc(void)
   release(&kmem.lock);
 
   if(r)
+  {
     memset((char*)r, 5, PGSIZE); // fill with junk
+    inc_cowref((uint64) r);
+  }
+
   return (void*)r;
+}
+
+int
+get_cowref(uint64 pa)
+{
+  int num = 0, idx = 0;
+
+  idx = (pa - KERNBASE) / PGSIZE;
+  acquire(&kpage.lock);
+  num = kpage.ref[idx];
+  release(&kpage.lock);
+
+  return num;
+}
+
+void
+set_cowref(uint64 pa, int val)
+{
+  int idx = (pa - KERNBASE) / PGSIZE;
+
+  acquire(&kpage.lock);
+  kpage.ref[idx] = val;
+  release(&kpage.lock);
+}
+
+void
+inc_cowref(uint64 pa)
+{
+  int idx = (pa - KERNBASE) / PGSIZE;
+
+  acquire(&kpage.lock);
+  ++kpage.ref[idx];
+  release(&kpage.lock);
+}
+
+void
+dec_cowref(uint64 pa)
+{
+  int idx = (pa - KERNBASE) / PGSIZE;
+
+  acquire(&kpage.lock);
+  --kpage.ref[idx];
+  release(&kpage.lock);
 }
