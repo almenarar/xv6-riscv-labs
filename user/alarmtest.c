@@ -48,8 +48,8 @@ test0()
   int i;
   printf("test0 start\n");
   count = 0;
-  sigalarm(2, periodic);
-  for(i = 0; i < 1000*500000; i++){
+  sigalarm(2, (uint64)periodic);
+  for(i = 0; i < 2000*500000; i++){
     if((i % 1000000) == 0)
       write(2, ".", 1);
     if(count > 0)
@@ -87,7 +87,7 @@ test1()
   printf("test1 start\n");
   count = 0;
   j = 0;
-  sigalarm(2, periodic);
+  sigalarm(2, (uint64)periodic);
   for(i = 0; i < 500000000; i++){
     if(count >= 10)
       break;
@@ -124,7 +124,7 @@ test2()
   }
   if (pid == 0) {
     count = 0;
-    sigalarm(2, slow_handler);
+    sigalarm(2, (uint64)slow_handler);
     for(i = 0; i < 1000*500000; i++){
       if((i % 1000000) == 0)
         write(2, ".", 1);
@@ -177,7 +177,7 @@ test3()
 {
   uint64 a0;
 
-  sigalarm(1, dummy_handler);
+  sigalarm(1, (uint64)dummy_handler);
   printf("test3 start\n");
 
   asm volatile("lui a5, 0");

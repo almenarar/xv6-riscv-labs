@@ -170,6 +170,34 @@ clockintr()
     release(&tickslock);
   }
 
+  // Handle alarms for user space processes
+  if ((r_sstatus() & SSTATUS_SPP) == 0) {
+    struct proc *p = myproc();
+    if (p->alarmticks > 0 && !p->alarm_in_progress)
+    {
+      p->currentalarmticks++;
+      if (p->currentalarmticks >= p->alarmticks) {
+        p->currentalarmticks = 0;
+        
+        // Allocate memory to save the current trapframe
+        p->saved_trapframe = (struct trapframe*)kalloc();
+        if (p->saved_trapframe == 0) {
+          printf("PID %d: Failed to allocate memory for saved trapframe\n", p->pid);
+          p->killed = 1;
+        } else {
+          // Save the current trapframe
+          memmove(p->saved_trapframe, p->trapframe, sizeof(struct trapframe));
+          
+          // Set alarm handler as the new program counter
+          p->trapframe->epc = p->alarmhandler;
+          
+          // Mark that an alarm is in progress to prevent reentrancy
+          p->alarm_in_progress = 1;
+        }
+      }
+    }
+  }
+
   // ask for the next timer interrupt. this also clears
   // the interrupt request. 1000000 is about a tenth
   // of a second.

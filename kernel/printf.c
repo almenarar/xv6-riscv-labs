@@ -160,6 +160,32 @@ printf(char *fmt, ...)
 }
 
 void
+backtrace(void)
+{
+  #define PEEK_STACK(addr) (*(uint64*)(addr))
+  uint64 current_fp = r_fp();
+
+  uint64 initial_fp_page;
+  initial_fp_page = PGROUNDDOWN(current_fp);
+
+  int frame_num = 0;
+  uint64 return_address;
+  uint64 saved_fp_previous;
+
+  printf("backtrace:\n");
+  while (current_fp != 0 && PGROUNDDOWN(current_fp) == initial_fp_page) {
+    
+    return_address = PEEK_STACK(current_fp - 8);
+    saved_fp_previous = PEEK_STACK(current_fp - 16);
+
+    printf("0x%lx\n",return_address);
+
+    current_fp = saved_fp_previous;
+    frame_num++;
+  }
+}
+
+void
 panic(char *s)
 {
   pr.locking = 0;
