@@ -174,8 +174,6 @@ bwrite(struct buf *b)
   virtio_disk_rw(b, 1);
 }
 
-// Release a locked buffer.
-// When refcnt becomes 0, keep the buffer in its current bucket (no LRU movement needed)
 void
 brelse(struct buf *b)
 {
