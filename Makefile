@@ -62,10 +62,10 @@ endif
 # riscv64-unknown-elf- or riscv64-linux-gnu-
 # perhaps in /opt/riscv/bin
 #TOOLPREFIX = 
-PATH := /opt/homebrew/opt/llvm@16/bin:$(PATH)
-CPPFLAGS := -I/opt/homebrew/opt/llvm@16/include
-LDFLAGS_EXTRA := -L/opt/homebrew/opt/llvm@16/lib
-TOOLPREFIX = /opt/riscv/bin/riscv64-unknown-elf-
+#PATH := /opt/homebrew/opt/llvm@16/bin:$(PATH)
+#CPPFLAGS := -I/opt/homebrew/opt/llvm@16/include
+#LDFLAGS_EXTRA := -L/opt/homebrew/opt/llvm@16/lib
+#TOOLPREFIX = /opt/riscv/bin/riscv64-unknown-elf-
 
 # Try to infer the correct TOOLPREFIX if not set
 ifndef TOOLPREFIX
