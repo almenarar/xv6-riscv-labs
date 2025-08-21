@@ -385,6 +385,7 @@ bmap(struct inode *ip, uint bn)
   uint addr, *a;
   struct buf *bp;
 
+  // Direct blocks (0-10)
   if(bn < NDIRECT){
     if((addr = ip->addrs[bn]) == 0){
       addr = balloc(ip->dev);
@@ -396,8 +397,9 @@ bmap(struct inode *ip, uint bn)
   }
   bn -= NDIRECT;
 
+  // Single indirect block (blocks 11 to 11+NINDIRECT-1)
   if(bn < NINDIRECT){
-    // Load indirect block, allocating if necessary.
+    // Load single indirect block, allocating if necessary.
     if((addr = ip->addrs[NDIRECT]) == 0){
       addr = balloc(ip->dev);
       if(addr == 0)
@@ -417,6 +419,53 @@ bmap(struct inode *ip, uint bn)
     return addr;
   }
 
+  bn -= NINDIRECT;
+  // Double indirect block (blocks beyond single indirect)
+  if(bn < DOUBLENINDIRECT){
+    // Load double indirect block, allocating if necessary.
+    if((addr = ip->addrs[NDIRECT + 1]) == 0){
+      addr = balloc(ip->dev);
+      if(addr == 0)
+        return 0;
+      ip->addrs[NDIRECT + 1] = addr;
+    }
+
+    // Read the double indirect block
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+    
+    // Calculate which single indirect block we need
+    uint first_level = bn / NINDIRECT;
+    uint second_level = bn % NINDIRECT;
+    
+    // Get or allocate the single indirect block
+    if((addr = a[first_level]) == 0){
+      addr = balloc(ip->dev);
+      if(addr == 0){
+        brelse(bp);
+        return 0;
+      }
+      a[first_level] = addr;
+      log_write(bp);
+    }
+    brelse(bp);
+    
+    // Now read the single indirect block
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+    
+    // Get or allocate the actual data block
+    if((addr = a[second_level]) == 0){
+      addr = balloc(ip->dev);
+      if(addr){
+        a[second_level] = addr;
+        log_write(bp);
+      }
+    }
+    brelse(bp);
+    return addr;
+  }
+
   panic("bmap: out of range");
 }
 
@@ -426,8 +475,8 @@ void
 itrunc(struct inode *ip)
 {
   int i, j;
-  struct buf *bp;
-  uint *a;
+  struct buf *bp, *bp2;
+  uint *a, *a2;
 
   for(i = 0; i < NDIRECT; i++){
     if(ip->addrs[i]){
@@ -447,6 +496,29 @@ itrunc(struct inode *ip)
     bfree(ip->dev, ip->addrs[NDIRECT]);
     ip->addrs[NDIRECT] = 0;
   }
+
+  if(ip->addrs[NDIRECT+1]){
+    // Free double indirect blocks
+    bp = bread(ip->dev, ip->addrs[NDIRECT+1]);
+    a = (uint*)bp->data;
+    for(j = 0; j < NINDIRECT; j++){
+      if(a[j]){
+        bp2 = bread(ip->dev, a[j]);
+        a2 = (uint*)bp2->data;
+        for(int k=0; k<NINDIRECT; k++) {
+            if(a2[k]) {
+                bfree(ip->dev, a2[k]);
+            }
+        }
+        brelse(bp2);
+        bfree(ip->dev, a[j]);
+      }
+    }
+    brelse(bp);
+    bfree(ip->dev, ip->addrs[NDIRECT+1]);
+    ip->addrs[NDIRECT+1] = 0;
+  }
+
 
   ip->size = 0;
   iupdate(ip);
@@ -471,6 +543,24 @@ stati(struct inode *ip, struct stat *st)
 int
 readi(struct inode *ip, int user_dst, uint64 dst, uint off, uint n)
 {
+  // Symlink: only allow reading the stored target string
+  if(ip->type == T_SYMLINK){
+    if(off > ip->size) return 0;
+    if(off + n > ip->size) n = ip->size - off;
+    if(n == 0) return 0;
+
+    // ensure we have a block
+    if(ip->addrs[0] == 0) return 0;
+    struct buf *bp = bread(ip->dev, ip->addrs[0]);
+    uint m = min(n, BSIZE - off);
+    if(either_copyout(user_dst, dst, bp->data + off, m) == -1){
+      brelse(bp);
+      return -1;
+    }
+    brelse(bp);
+    return m;
+  }
+
   uint tot, m;
   struct buf *bp;
 
@@ -505,6 +595,34 @@ readi(struct inode *ip, int user_dst, uint64 dst, uint off, uint n)
 int
 writei(struct inode *ip, int user_src, uint64 src, uint off, uint n)
 {
+  // Symlink: only allow a single write at offset 0, limited to MAXPATH (including '\0')
+  if(ip->type == T_SYMLINK){
+    if(off != 0) return -1;
+    if(n > MAXPATH) return -1;      // refuse oversized targets
+    if(n > BSIZE) return -1;        // ensure fits in one block
+
+    // allocate block if needed, but only addrs[0]
+    if(ip->addrs[0] == 0){
+      uint b = balloc(ip->dev);
+      ip->addrs[0] = b;
+    }
+    struct buf *bp = bread(ip->dev, ip->addrs[0]);
+    if(either_copyin(bp->data + off, user_src, src, n) == -1){
+      brelse(bp);
+      return -1;
+    }
+    // zero the rest of the block beyond n to avoid leaking data
+    if(off + n < BSIZE)
+      memset(bp->data + off + n, 0, BSIZE - (off + n));
+    log_write(bp);
+    brelse(bp);
+    if(ip->size < off + n){
+      ip->size = off + n;
+      iupdate(ip);
+    }
+    return n;
+  }
+
   uint tot, m;
   struct buf *bp;
 
