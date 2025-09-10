@@ -258,8 +258,6 @@ create(char *path, short type, short major, short minor)
     ilock(ip);
     if(type == T_FILE && (ip->type == T_FILE || ip->type == T_DEVICE))
       return ip;
-    if(type == T_SYMLINK && (ip->type == T_SYMLINK || ip->type == T_DEVICE))
-      return ip;
     iunlockput(ip);
     return 0;
   }
@@ -332,24 +330,27 @@ sys_open(void)
     ilock(ip);
     
     if (!(omode & O_NOFOLLOW)) {
-      int i = 0;
-      struct inode *next_ip;
-      char next_path[MAXPATH]; // Use a temporary buffer for the symlink's path
-      
-      // Read and resolve symlinks
-      while (ip->type == T_SYMLINK) {
-        if(readi(ip, 0, (uint64)next_path, 0, MAXPATH) <= 0)
-          panic("open: readi");
-        
-        iunlockput(ip); // Now it is safe to release the old inode
-        
-        // Resolve the next path in the chain
-        if((next_ip = namei(next_path)) == 0 || (i++ == 20)){
-          end_op(); 
+       int depth = 0;
+       while(ip->type == T_SYMLINK){
+        if(depth++ >= 10){
+          iunlockput(ip);
+          end_op();
           return -1;
         }
-        ip = next_ip; // Use the new inode
-        ilock(ip); // Lock the new inode to check its type
+        char target[MAXPATH];
+        int r = readi(ip, 0, (uint64)target, 0, MAXPATH-1);
+        if(r < 0){
+          iunlockput(ip);
+          end_op();
+          return -1;
+        }
+        target[r] = '\0';
+        iunlockput(ip);
+        if((ip = namei(target)) == 0){
+          end_op();
+          return -1;
+        }
+        ilock(ip);
       }
     }
     
@@ -547,7 +548,13 @@ sys_symlink(void)
   }
   
   if(writei(ip, 0, (uint64)old, 0, len) != len)
-    panic("sys_symlink: writei");
+  {
+    ip->nlink = 0;
+    iupdate(ip);
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
   
   iunlockput(ip);
   end_op();      
